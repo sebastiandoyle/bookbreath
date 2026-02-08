@@ -142,8 +142,11 @@ async function batchTTS(
   onEach?: () => void
 ): Promise<string[]> {
   const results = await Promise.all(
-    items.map(async (item) => {
+    items.map(async (item, i) => {
+      const start = Date.now();
       const buf = await generateTTSSingle(openai, item.text, item.voice);
+      const ms = Date.now() - start;
+      console.log(`[TIMING] TTS #${i + 1}/${items.length}: ${ms}ms (${item.text.length} chars, ${item.voice})`);
       onEach?.();
       return buf.toString("base64");
     })
@@ -231,6 +234,8 @@ export async function generateSession(
   const passages = splitIntoPassages(chapter.content);
   const chapterPreview = chapter.content.slice(0, 500);
 
+  const t0 = Date.now();
+
   // Phase 1: Generate GPT content (intro + nudges in parallel)
   onProgress?.("Crafting your session...", 1, 2);
   const [introText, nudges] = await Promise.all([
@@ -238,8 +243,9 @@ export async function generateSession(
     generateNudges(openai, userIntention, passages, book.title, book.author),
   ]);
 
+  const t1 = Date.now();
   console.log(
-    `GPT done: intro ${introText.length} chars, ${nudges.length} nudges, ${passages.length} passages`
+    `[TIMING] Phase 1 (GPT intro+nudges): ${t1 - t0}ms — intro ${introText.length} chars, ${nudges.length} nudges, ${passages.length} passages`
   );
 
   // Phase 2: Add pacing to all segments via GPT
@@ -265,8 +271,9 @@ export async function generateSession(
     { line: "When you are ready, carry this awareness gently with you.", pause_after_seconds: 7 },
   ];
 
+  const t2 = Date.now();
   console.log(
-    `Pacing done: intro ${introPaced.length} lines, ` +
+    `[TIMING] Phase 2 (pacing): ${t2 - t1}ms — intro ${introPaced.length} lines, ` +
     `passages ${passagesPaced.map((p) => p.length).join("+")} lines, ` +
     `nudges ${nudgesPaced.map((n) => n.length).join("+")} lines, ` +
     `closing ${closingPaced.length} lines`
@@ -317,6 +324,7 @@ export async function generateSession(
 
   onProgress?.("Recording audio...", 2, 3);
 
+  const t3start = Date.now();
   let ttsCompleted = 0;
   const audioResults = await batchTTS(
     openai,
@@ -337,6 +345,10 @@ export async function generateSession(
     audioBase64: audioResults[i],
     pauseAfter: item.pauseAfter > 0 ? item.pauseAfter : undefined,
   }));
+
+  const t3end = Date.now();
+  console.log(`[TIMING] Phase 3 (TTS): ${t3end - t3start}ms for ${allItems.length} calls`);
+  console.log(`[TIMING] Total: ${t3end - t0}ms`);
 
   onProgress?.("Session ready!", 3, 3);
   console.log(`Session generated: ${segments.length} segments (${allItems.length} TTS calls)`);
