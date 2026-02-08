@@ -34,3 +34,17 @@ export interface GeneratedSession {
 export interface Progress {
   [bookId: string]: string[]; // array of completed chapter IDs
 }
+
+export interface ContentResult {
+  intro: string;
+  passages: string[];
+  nudges: string[];
+}
+
+export interface TTSItem {
+  text: string;
+  voice: "nova" | "onyx";
+  segType: SessionSegment["type"];
+  pauseAfter: number;
+  displayText: string;
+}

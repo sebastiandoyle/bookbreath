@@ -10,7 +10,8 @@ import CompletionCelebration from "@/components/CompletionCelebration";
 import ApiKeyInput from "@/components/ApiKeyInput";
 import { getProgress, markChapterComplete } from "@/lib/progress";
 import { getApiKey, setApiKey, clearApiKey } from "@/lib/api-key";
-import { Progress, GeneratedSession } from "@/lib/types";
+import { Progress, GeneratedSession, ContentResult, PacedLine } from "@/lib/types";
+import { buildTTSItems, assembleSegments } from "@/lib/session-assembly";
 
 interface BookMeta {
   id: string;
@@ -89,41 +90,103 @@ export default function Home() {
 
       setIsGenerating(true);
       setView("generating");
-      setGenProgress({ step: "Starting...", current: 0, total: 1 });
 
-      try {
-        const res = await fetch("/api/generate-session", {
+      const PACING_BATCH = 5;
+      const AUDIO_BATCH = 30;
+
+      async function post(url: string, body: Record<string, unknown>) {
+        const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            bookId: selectedBook.id,
-            chapterId: selectedChapter.id,
-            userIntention: intention,
-            apiKey: apiKeyState,
-          }),
+          body: JSON.stringify({ ...body, apiKey: apiKeyState }),
         });
-
         if (!res.ok) {
-          const errBody = await res.json().catch(() => ({ error: res.statusText }));
+          const err = await res.json().catch(() => ({ error: res.statusText }));
           if (res.status === 401) {
             clearApiKey();
             setApiKeyState(null);
-            alert("Invalid API key. Please enter a valid OpenAI key.");
-            return;
+            throw new Error("INVALID_KEY");
           }
-          throw new Error(errBody.error || `API ${res.status}`);
+          throw new Error(err.error || `API ${res.status}`);
+        }
+        return res.json();
+      }
+
+      try {
+        // Step 1: Generate text content (~15s)
+        setGenProgress({ step: "Crafting your session...", current: 1, total: 3 });
+        const content: ContentResult = await post("/api/session/content", {
+          bookId: selectedBook.id,
+          chapterId: selectedChapter.id,
+          userIntention: intention,
+        });
+
+        // Step 2: Pacing — batch items and run batches in parallel
+        setGenProgress({ step: "Adding breathing pauses...", current: 2, total: 3 });
+        const pacingItems = [
+          { text: content.intro, segmentType: "intro" },
+          ...content.passages.map((p) => ({ text: p, segmentType: "passage" })),
+          ...content.nudges.map((n) => ({ text: n, segmentType: "nudge" })),
+        ];
+
+        const pacingBatches: typeof pacingItems[] = [];
+        for (let i = 0; i < pacingItems.length; i += PACING_BATCH) {
+          pacingBatches.push(pacingItems.slice(i, i + PACING_BATCH));
         }
 
-        const text = await res.text();
-        console.log("Response size:", (text.length / 1024 / 1024).toFixed(2), "MB");
-        const data: GeneratedSession = JSON.parse(text);
-        console.log("Segments received:", data.segments?.length);
-        setSession(data);
+        const pacingResponses = await Promise.all(
+          pacingBatches.map((batch) =>
+            post("/api/session/pacing", { items: batch })
+          )
+        );
+        const allPaced: PacedLine[][] = pacingResponses.flatMap((r) => r.results);
+
+        // Split pacing results back into intro / passages / nudges
+        const introPaced = allPaced[0];
+        const passagesPaced = allPaced.slice(1, 1 + content.passages.length);
+        const nudgesPaced = allPaced.slice(1 + content.passages.length);
+
+        // Build TTS items (client-side, instant)
+        const ttsItems = buildTTSItems(introPaced, passagesPaced, nudgesPaced);
+        console.log(`TTS items to generate: ${ttsItems.length}`);
+
+        // Step 3: Audio — batch items and run batches in parallel
+        setGenProgress({ step: "Recording audio...", current: 3, total: 3 });
+        const audioBatches: { text: string; voice: "nova" | "onyx" }[][] = [];
+        for (let i = 0; i < ttsItems.length; i += AUDIO_BATCH) {
+          audioBatches.push(
+            ttsItems.slice(i, i + AUDIO_BATCH).map((item) => ({
+              text: item.text,
+              voice: item.voice,
+            }))
+          );
+        }
+
+        const audioResponses = await Promise.all(
+          audioBatches.map((batch) =>
+            post("/api/session/audio", { items: batch })
+          )
+        );
+        const allAudio: string[] = audioResponses.flatMap((r) => r.results);
+
+        // Assemble final session
+        const segments = assembleSegments(ttsItems, allAudio);
+        console.log("Segments received:", segments.length);
+
+        setSession({
+          segments,
+          bookTitle: selectedBook.title,
+          chapterTitle: selectedChapter.title,
+        });
         setView("playing");
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        console.error("Session generation failed:", msg);
-        alert(`Failed to generate session: ${msg}`);
+        if (msg === "INVALID_KEY") {
+          alert("Invalid API key. Please enter a valid OpenAI key.");
+        } else {
+          console.error("Session generation failed:", msg);
+          alert(`Failed to generate session: ${msg}`);
+        }
         setView("intention");
       } finally {
         setIsGenerating(false);
