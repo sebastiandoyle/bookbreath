@@ -141,21 +141,13 @@ async function batchTTS(
   items: { text: string; voice: "nova" | "onyx" }[],
   onEach?: () => void
 ): Promise<string[]> {
-  const results: string[] = [];
-  const BATCH_SIZE = 10;
-
-  for (let i = 0; i < items.length; i += BATCH_SIZE) {
-    const batch = items.slice(i, i + BATCH_SIZE);
-    const batchResults = await Promise.all(
-      batch.map(async (item) => {
-        const buf = await generateTTSSingle(openai, item.text, item.voice);
-        onEach?.();
-        return buf.toString("base64");
-      })
-    );
-    results.push(...batchResults);
-  }
-
+  const results = await Promise.all(
+    items.map(async (item) => {
+      const buf = await generateTTSSingle(openai, item.text, item.voice);
+      onEach?.();
+      return buf.toString("base64");
+    })
+  );
   return results;
 }
 
