@@ -142,7 +142,7 @@ async function batchTTS(
   onEach?: () => void
 ): Promise<string[]> {
   const results: string[] = [];
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 10;
 
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const batch = items.slice(i, i + BATCH_SIZE);
@@ -281,31 +281,47 @@ export async function generateSession(
   );
 
   // Phase 3: Generate TTS for all paced lines
-  // Collect all TTS items with metadata for reassembly
+  // Merge adjacent lines with 0s pause into single TTS items to reduce API calls
   type TTSItem = { text: string; voice: "nova" | "onyx"; segType: SessionSegment["type"]; pauseAfter: number; displayText: string };
+
+  function mergePacedLines(
+    lines: PacedLine[],
+    voice: "nova" | "onyx",
+    segType: SessionSegment["type"]
+  ): TTSItem[] {
+    const items: TTSItem[] = [];
+    let mergedText = "";
+    for (const line of lines) {
+      mergedText += (mergedText ? " " : "") + line.line;
+      if (line.pause_after_seconds > 0 || line === lines[lines.length - 1]) {
+        items.push({
+          text: mergedText,
+          voice,
+          segType,
+          pauseAfter: line.pause_after_seconds,
+          displayText: mergedText,
+        });
+        mergedText = "";
+      }
+    }
+    return items;
+  }
+
   const allItems: TTSItem[] = [];
 
-  // Intro lines
-  for (const line of introPaced) {
-    allItems.push({ text: line.line, voice: GUIDE_VOICE, segType: "intro", pauseAfter: line.pause_after_seconds, displayText: line.line });
-  }
+  // Intro lines (keep individual — each has meaningful pauses)
+  allItems.push(...mergePacedLines(introPaced, GUIDE_VOICE, "intro"));
 
   // Interleave passages and nudges
   for (let i = 0; i < passages.length; i++) {
-    for (const line of passagesPaced[i]) {
-      allItems.push({ text: line.line, voice: READER_VOICE, segType: "passage", pauseAfter: line.pause_after_seconds, displayText: line.line });
-    }
+    allItems.push(...mergePacedLines(passagesPaced[i], READER_VOICE, "passage"));
     if (i < passages.length - 1 && nudgesPaced[i]) {
-      for (const line of nudgesPaced[i]) {
-        allItems.push({ text: line.line, voice: GUIDE_VOICE, segType: "nudge", pauseAfter: line.pause_after_seconds, displayText: line.line });
-      }
+      allItems.push(...mergePacedLines(nudgesPaced[i], GUIDE_VOICE, "nudge"));
     }
   }
 
-  // Closing lines
-  for (const line of closingPaced) {
-    allItems.push({ text: line.line, voice: GUIDE_VOICE, segType: "closing", pauseAfter: line.pause_after_seconds, displayText: line.line });
-  }
+  // Closing lines (each has a pause, so no merging happens)
+  allItems.push(...mergePacedLines(closingPaced, GUIDE_VOICE, "closing"));
 
   onProgress?.("Recording audio...", 2, 3);
 
